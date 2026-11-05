@@ -394,6 +394,10 @@ h1.logo{margin:4px 0 0;font-size:clamp(40px,10vw,66px);line-height:1;color:#ffd2
    MAGIC FARM ENGLISH QUEST — single-file HTML5 game
    ========================================================= */
 const CONFIG={
+  // ===== ONLINE SCORES (คะแนนรวมออนไลน์ทุกเครื่อง) =====
+  // วาง Web App URL จาก Google Apps Script (ไฟล์ Code.gs) ระหว่างเครื่องหมาย ' ' ด้านล่าง
+  // Paste your Google Apps Script Web App URL (ends with /exec) here:
+  SCORE_API_URL:'https://script.google.com/macros/s/AKfycbztACx8QDOkx7_t25lyY3DAhNGNEyoNOybIk6b51Qf2pipYxPGnpkgJ0SCrL9I8Rov5mw/exec',
   ADMIN_USER:'teacher',
   ADMIN_PASS:'teacher2548',
   SCHOOL_NAME:'โรงเรียนสารสาสน์วิเทศนิมิตใหม่',
@@ -555,13 +559,36 @@ const CHARS={
 
 /* ---------------- STORAGE ---------------- */
 const REC_KEY='mfeq_records_v1';
+const PEND_KEY='mfeq_pending_v1';
 const Store={
+ api(){const u=String(CONFIG.SCORE_API_URL||'').trim();return /^https:\/\/script\.google(usercontent)?\.com\//.test(u)?u:'';},
+ lastSource:'local',flushing:false,
  local(){return lsGet(REC_KEY,[]);},
+ pending(){return lsGet(PEND_KEY,[]);},
+ setPending(a){lsSet(PEND_KEY,a.slice(-500));},
  norm(r){return {id:String(r.id),date:r.date,name:String(r.name||''),cls:String(r.cls||''),char:r.char||'boy',level:+r.level||1,score:+r.score||0,correct:+r.correct||0,wrong:+r.wrong||0,accuracy:+r.accuracy||0,hp:+r.hp||0,stars:+r.stars||0,result:r.result||'complete'};},
- async all(){return this.local().map(x=>this.norm(x));},
- async add(rec){const a=this.local();a.push(rec);lsSet(REC_KEY,a.slice(-2000));},
- async remove(id){lsSet(REC_KEY,this.local().filter(r=>String(r.id)!==String(id)));},
- async clear(){lsSet(REC_KEY,[]);}
+ async req(body){
+  const api=this.api();if(!api)return false;const opt={method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)};
+  try{const r=await fetch(api,opt);const j=await r.json();return !!(j&&j.ok);}
+  catch(e){if(!navigator.onLine)return false;try{await fetch(api,Object.assign({mode:'no-cors'},opt));return true;}catch(e2){return false;}}
+ },
+ async flush(){
+  if(!this.api()||this.flushing)return;const q=this.pending();if(!q.length)return;this.flushing=true;
+  const sent=[];for(const r of q){if(await this.req({action:'add',record:r}))sent.push(String(r.id));else break;}
+  this.setPending(this.pending().filter(r=>!sent.includes(String(r.id))));this.flushing=false;
+ },
+ async all(){
+  const api=this.api();
+  if(api){try{const r=await fetch(api+(api.includes('?')?'&':'?')+'action=list&t='+Date.now());const j=await r.json();
+    if(j&&j.ok&&Array.isArray(j.records)){this.lastSource='online';const ids=new Set(j.records.map(x=>String(x.id)));
+     return j.records.concat(this.pending().filter(x=>!ids.has(String(x.id)))).map(x=>this.norm(x));}}catch(e){console.warn('online scores unavailable',e);}
+   this.lastSource='offline';}
+  else this.lastSource='local';
+  return this.local().map(x=>this.norm(x));
+ },
+ async add(rec){const a=this.local();a.push(rec);lsSet(REC_KEY,a.slice(-2000));if(this.api()){const q=this.pending();q.push(rec);this.setPending(q);await this.flush();}},
+ async remove(id){lsSet(REC_KEY,this.local().filter(r=>String(r.id)!==String(id)));this.setPending(this.pending().filter(r=>String(r.id)!==String(id)));return this.api()?await this.req({action:'delete',id,password:CONFIG.ADMIN_PASS}):true;},
+ async clear(){lsSet(REC_KEY,[]);this.setPending([]);return this.api()?await this.req({action:'clear',password:CONFIG.ADMIN_PASS}):true;}
 };
 const progKey=()=>'mfeq_prog_'+(G.player.name+'|'+G.player.cls).toLowerCase();
 function getProg(){return lsGet(progKey(),{unlocked:1,best:{},stars:{}});}
@@ -1451,8 +1478,18 @@ function drawCharCards(){
   x.translate(140,302);x.scale(3.75,3.75);ell(x,0,0,13,5,'rgba(0,0,0,.18)');const sel=G.player.char===k;
   drawFarmer(x,CHARS[k],{t:G.time+k.length,moving:false,action:sel?'celebrate':null,at:G.time});}
 }
+function progFromRecords(recs){
+ const key=(G.player.name+'|'+G.player.cls).toLowerCase(),pr=getProg();
+ for(const r of recs){if((r.name+'|'+r.cls).toLowerCase()!==key)continue;
+  pr.best[r.level]=Math.max(pr.best[r.level]||0,r.score);
+  if(r.result==='complete'){pr.stars[r.level]=Math.max(pr.stars[r.level]||0,r.stars);pr.unlocked=Math.max(pr.unlocked,Math.min(4,r.level+1));}}
+ setProg(pr);return pr;
+}
 function openLevels(){
- const pr=getProg();$('#lvWho').innerHTML=`Farmer: <b>${esc(G.player.name)}</b> ${G.player.cls?'('+esc(G.player.cls)+')':''} — ${CHARS[G.player.char].name}`;
+ renderLevels(getProg());showScreen('sLevels');
+ if(Store.api())Store.all().then(recs=>{if(Store.lastSource==='online'&&$('#sLevels').classList.contains('show'))renderLevels(progFromRecords(recs));}).catch(()=>{});
+}
+function renderLevels(pr){$('#lvWho').innerHTML=`Farmer: <b>${esc(G.player.name)}</b> ${G.player.cls?'('+esc(G.player.cls)+')':''} — ${CHARS[G.player.char].name}`;
  const grid=$('#levelGrid');grid.innerHTML='';
  LEVELS.forEach(L=>{const locked=L.n>pr.unlocked,b=document.createElement('button');b.className='lcard'+(locked?' locked':'');b.style.background=L.card;
   const s=pr.stars[L.n]||0;b.innerHTML=`<span class="ic">${L.icon}</span><h3>Level ${L.n}</h3><div style="font-weight:700">${L.name}</div><div>📘 ${L.focus}</div><div class="st">${'★'.repeat(s)}${'☆'.repeat(3-s)}</div><div>Best: ${pr.best[L.n]||0}</div>`;
@@ -1474,7 +1511,10 @@ function aggregate(recs){
 const charEmoji={boy:'👦',blonde:'👱‍♀️',braids:'👧'};
 const medal=i=>i===0?'🥇':i===1?'🥈':i===2?'🥉':'#'+(i+1);
 async function openDash(tab){G.dashTab=tab||'rank';showScreen('sDash');document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.tab===G.dashTab));$('#dashBody').innerHTML='<p>Loading scores…</p>';G.dashRecs=await Store.all();renderDash();}
-function srcNote(){return '💾 Scores are saved in this browser on this device.';}
+function srcNote(){const n=Store.pending().length,w=n?` (${n} score${n>1?'s':''} waiting to upload)`:'';
+ if(Store.lastSource==='online')return '🌐 Online scores from every device'+w+'.';
+ if(Store.lastSource==='offline')return '⚠️ Cannot reach the online score server (check the internet or SCORE_API_URL). Showing this device only'+w+'.';
+ return '💾 Online scores are not set up yet — showing this device only. Teacher: add SCORE_API_URL (see Code.gs).';}
 function renderDash(){
  const lv=+$('#dashLevel').value||0,recs=(G.dashRecs||[]).filter(r=>!lv||r.level===lv),body=$('#dashBody');$('#dashSrc').textContent=srcNote();
  document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('on',b.dataset.tab===G.dashTab));
@@ -1523,7 +1563,7 @@ function renderAdmin(){
  let h='<div class="tblwrap"><table class="tbl"><tr><th>Date</th><th style="text-align:left">Player</th><th>Class</th><th>Lv</th><th>Score</th><th>Acc.</th><th>HP</th><th>★</th><th>Result</th><th></th></tr>';
  recs.forEach(r=>{h+=`<tr><td>${fmtDate(r.date)}</td><td>${esc(r.name)}</td><td style="text-align:center">${esc(r.cls)}</td><td style="text-align:center">${r.level}</td><td style="text-align:center;font-weight:700">${r.score}</td><td style="text-align:center">${r.accuracy}%</td><td style="text-align:center">${r.hp}</td><td style="text-align:center">${r.stars}</td><td style="text-align:center">${r.result==='complete'?'✅':'💀'}</td><td><button class="del" data-id="${esc(r.id)}">🗑️</button></td></tr>`;});
  $('#adBody').innerHTML=h+'</table></div>';
- $('#adBody').querySelectorAll('.del').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this score record?'))return;await Store.remove(b.dataset.id);G.adminRecs=G.adminRecs.filter(r=>r.id!==b.dataset.id);renderAdmin();});
+ $('#adBody').querySelectorAll('.del').forEach(b=>b.onclick=async()=>{if(!confirm('Delete this score record?'))return;const ok=await Store.remove(b.dataset.id);if(!ok){alert('Could not reach the online server. Please try again.');return;}G.adminRecs=G.adminRecs.filter(r=>r.id!==b.dataset.id);renderAdmin();});
 }
 function downloadBlob(blob,name){const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);}
 function exportCSV(){
@@ -1640,7 +1680,7 @@ $('#btnLogin').onclick=doLogin;
 $('#btnLogout').onclick=()=>{sessionStorage.removeItem('mfeq_admin');showScreen('sTitle');};
 $('#btnAdRefresh').onclick=openAdmin;$('#adSearch').oninput=renderAdmin;$('#adLevel').onchange=renderAdmin;
 $('#btnCSV').onclick=exportCSV;$('#btnPDF').onclick=()=>exportPDF('download');$('#btnPrint').onclick=()=>exportPDF('print');
-$('#btnClear').onclick=async()=>{if(!confirm('Delete ALL player scores? This cannot be undone.'))return;if(!confirm('Are you sure? All rankings and the dashboard will be reset.'))return;await Store.clear();G.adminRecs=[];renderAdmin();alert('All scores were cleared.');};
+$('#btnClear').onclick=async()=>{if(!confirm('Delete ALL player scores? This cannot be undone.'))return;if(!confirm('Are you sure? All rankings and the dashboard will be reset.'))return;const ok=await Store.clear();G.adminRecs=await Store.all();renderAdmin();alert(ok?'All scores were cleared.':'Could not reach the online server. Please check the internet and try again.');};
 
 /* ---------------- LOOP ---------------- */
 let last=performance.now(),errShown=false;
@@ -1653,6 +1693,7 @@ function boot(){
  resize();Speech.init();buildWorld(1);menuDress();G.state='menu';
  const [ix,iy]=iso(8,8);G.cam.x=ix;G.cam.y=iy;
  $('#loading').remove();showScreen('sTitle');requestAnimationFrame(loop);
+ Store.flush();setInterval(()=>Store.flush(),45000);addEventListener('online',()=>Store.flush());
 }
 if(!ctx){document.body.innerHTML='<p style="padding:20px;font-size:20px">Sorry, this browser cannot run the game (Canvas not supported). Please use Google Chrome.</p>';}
 else boot();
